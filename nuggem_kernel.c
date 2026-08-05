@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include <string.h>
 
 #define MR 6
 #define NR 8
@@ -42,7 +43,8 @@ void micro_kernel_6x8(
         float *packed_B,                    // The contiguous packed buffer
         float *C,                           // Pointer to 6x8 block of C to update
         int ldC,                            // Leading dimension of C for strided storing
-        int ldA
+        int ldA,
+        int Nr
         ){
     
 
@@ -62,43 +64,28 @@ void micro_kernel_6x8(
     float *A4 = A + 4 * ldA;
     float *A5 = A + 5 * ldA;
 
-    // inner loop over K ( steps by 8 )
-    for (int k = 0; k < Kc; k += 8){
+    // inner loop over K ( steps by 1 )
+    for (int k = 0; k < Kc; k++){
+
+        // broadacst each A element across all 8 lanes THEN FMA into the row
+        __m256 b = _mm256_loadu_ps(packed_B + k * Nr);
 
         // load the 6 rows of A for K block
-        __m256 a0 = _mm256_loadu_ps(A0);
-        __m256 a1 = _mm256_loadu_ps(A1);
-        __m256 a2 = _mm256_loadu_ps(A2);
-        __m256 a3 = _mm256_loadu_ps(A3);
-        __m256 a4 = _mm256_loadu_ps(A4);
-        __m256 a5 = _mm256_loadu_ps(A5);
-
-
-        // advance packedB to the next 8 K elements
-        for (int nc = 0; nc < 8; nc++){
-            __m256 b = _mm256_loadu_ps(packed_B + nc * Kc);
-
-            // FMA all 6 rows
-            c0 = _mm256_fmadd_ps(a0, b, c0);
-            c1 = _mm256_fmadd_ps(a1, b, c1);
-            c2 = _mm256_fmadd_ps(a2, b, c2);
-            c3 = _mm256_fmadd_ps(a3, b, c3);
-            c4 = _mm256_fmadd_ps(a4, b, c4);
-            c5 = _mm256_fmadd_ps(a5, b, c5);
-        }
-        A0 += 8; A1 += 8;
-        A2 += 8; A3 += 8;
-        A4 += 8; A5 += 8;
-
-        packed_B += 8;
+        c0 = _mm256_fmadd_ps(_mm256_broadcast_ss(A0 + k), b, c0);
+        c1 = _mm256_fmadd_ps(_mm256_broadcast_ss(A1 + k), b, c1);
+        c2 = _mm256_fmadd_ps(_mm256_broadcast_ss(A2 + k), b, c2);
+        c3 = _mm256_fmadd_ps(_mm256_broadcast_ss(A3 + k), b, c3);
+        c4 = _mm256_fmadd_ps(_mm256_broadcast_ss(A4 + k), b, c4);
+        c5 = _mm256_fmadd_ps(_mm256_broadcast_ss(A5 + k), b, c5);
     }
-        _mm256_storeu_ps(C + 0 * ldC, c0);
-        _mm256_storeu_ps(C + 1 * ldC, c1);
-        _mm256_storeu_ps(C + 2 * ldC, c2);
-        _mm256_storeu_ps(C + 3 * ldC, c3);
-        _mm256_storeu_ps(C + 4 * ldC, c4);
-        _mm256_storeu_ps(C + 5 * ldC, c5);
-    
+
+    // load-add-store so repeated tile calls accumulate ( C must be pre-zeroed )
+    _mm256_storeu_ps(C + 0 * ldC, _mm256_add_ps(_mm256_loadu_ps(C + 0 * ldC), c0));
+    _mm256_storeu_ps(C + 1 * ldC, _mm256_add_ps(_mm256_loadu_ps(C + 1 * ldC), c1));
+    _mm256_storeu_ps(C + 2 * ldC, _mm256_add_ps(_mm256_loadu_ps(C + 2 * ldC), c2));
+    _mm256_storeu_ps(C + 3 * ldC, _mm256_add_ps(_mm256_loadu_ps(C + 3 * ldC), c3));
+    _mm256_storeu_ps(C + 4 * ldC, _mm256_add_ps(_mm256_loadu_ps(C + 4 * ldC), c4));
+    _mm256_storeu_ps(C + 5 * ldC, _mm256_add_ps(_mm256_loadu_ps(C + 5 * ldC), c5));
 }
 
 void pack_B_tile(
@@ -111,14 +98,16 @@ void pack_B_tile(
     float *packed                           // Packed B
     ){
 
-    for (int col = 0; col < Nr; col++){
-        for (int row = 0; row < Kc; row++) 
-            packed[col * Kc + row] = B[(row_start + row) * ldB + (col_start + col)];
+    for (int row = 0; row < Kc; row++){
+        for (int col = 0; col < Nr; col++) 
+            packed[row * Nr + col] = B[(row_start + row) * ldB + (col_start + col)];
     }
 
 }
 
 void micro_kernel_scalar(
+        int Mr,                             // Rows of the C block ( caller's tile height )
+        int Nr,                             // Columns of the C block / packed per depth
         int Kc,                             // Number of rows to pack ( K dimension )
         int ldC,                            // Leading dimension of C
         int ldA,                            // Leading dimension of A 
@@ -126,22 +115,22 @@ void micro_kernel_scalar(
         float *packedB,                     // Pointer to packed B matrix 
         float *C                            // Pointer to packed C matrix
         ){
-    // init accumulators
-    float c[6][8] = {0};
+    // init accumulators ( VLA sized by the caller's block, so no initializer -> memset )
+    float c[Mr][Nr];
+    memset(c, 0, sizeof c);
 
-    // loop over K, step by 8 
+    // loop over K, step by 1
     for (int k = 0; k < Kc; k++){
         
-        // for each of the 8 columns of C and B
-        for (int nr = 0; nr < 6; nr++){
+        // for each row of the C block
+        for (int nr = 0; nr < Mr; nr++){
 
-            // packed b for this column starts at PackedB + nc * Kc
-            // we are at offset K in that column 
+            // we are at offset k in row nr of A
             float a_val = A[nr * ldA + k];
 
-            // for each of the 8 rows of C and B 
-            for (int nc = 0; nc < 8;nc++){
-                float b_val = packedB[nc * Kc + k];
+            // for each column of the C block
+            for (int nc = 0; nc < Nr; nc++){
+                float b_val = packedB[k * Nr + nc];
                 
                 // accumulate
                 c[nr][nc] += a_val * b_val;
@@ -150,8 +139,8 @@ void micro_kernel_scalar(
     }
 
     // Store back to C
-    for (int nr = 0; nr < 6; nr++){
-        for (int nc = 0; nc < 8; nc++){
+    for (int nr = 0; nr < Mr; nr++){
+        for (int nc = 0; nc < Nr; nc++){
             C[nr * ldC + nc] += c[nr][nc];
         }
     }
@@ -160,47 +149,50 @@ void micro_kernel_scalar(
 
 int main(){
     srand(time(NULL));
-    int Kc = 8; int ldA = Kc, ldC = 8;
+    int Kc = 8;
+    int ldA = Kc;                           // A panel: MR rows, each Kc long
+    int ldC = NR;                           // single-tile test: C block stored NR-wide
 
     int dim_size = 1024;
     float *A = malloc(dim_size * dim_size * sizeof(float));
     float *B = malloc(dim_size * dim_size * sizeof(float));
-    float *C_scalar = malloc(dim_size * dim_size * sizeof(float));
-    float *packedB = malloc(Kc * ldC * sizeof(float));
-    float *C_avx = malloc(dim_size * dim_size * sizeof(float));
+    float *C_scalar = calloc(dim_size * dim_size, sizeof(float));
+    float *packedB = malloc(Kc * NR * sizeof(float));
+    float *C_avx = calloc(dim_size * dim_size, sizeof(float));
 
     random_fill(A, dim_size, 4);
     random_fill(B, dim_size, 4);
 
-    pack_B_tile(B, dim_size,0,0,Kc,ldC,packedB); 
+    pack_B_tile(B, dim_size,0,0,Kc,NR,packedB); 
 
-    micro_kernel_scalar(Kc,ldC, ldA, A, packedB, C_scalar);
+    micro_kernel_scalar(MR,NR,Kc,ldC, ldA, A, packedB, C_scalar);
     
-    micro_kernel_6x8(Kc,A,packedB,C_avx,ldC,ldA);
+    micro_kernel_6x8(Kc,A,packedB,C_avx,ldC,ldA, NR);
+
 
     printf("RESULT C SCALAR:\n");
-    for (int r = 0; r < 6; r++){
-        for (int c = 0; c < 8; c++){
-            printf("%8.1f ", C_scalar[r*8+c]);
+    for (int r = 0; r < MR; r++){
+        for (int c = 0; c < NR; c++){
+            printf("%8.1f ", C_scalar[r*ldC+c]);
         }
     printf("\n");
     }
     
     printf("RESULT C AVX:\n");
-    for (int r = 0; r < 6; r++){
-        for (int c = 0; c < 8; c++){
-            printf("%8.1f ", C_avx[r*8+c]);
+    for (int r = 0; r < MR; r++){
+        for (int c = 0; c < NR; c++){
+            printf("%8.1f ", C_avx[r*ldC+c]);
         }
     printf("\n");
     }
     
     float max_diff = 0;
-    for (int i = 0; i < 6 * 8; i++) {
+    for (int i = 0; i < MR * NR; i++) {
         float diff = C_scalar[i] - C_avx[i];
         if (diff < 0) diff = -diff;
         if (diff > max_diff) max_diff = diff;
         printf("%8.1f ", diff);
-        if ((i + 1) % 8 == 0) printf("\n");
+        if ((i + 1) % NR == 0) printf("\n");
     }
     printf("\nMax difference: %f\n", max_diff);
 
