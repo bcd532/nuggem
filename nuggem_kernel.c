@@ -24,7 +24,7 @@ void zero_fill(float *a, int n, int r, int c){
 /* This function loops over tiles of C, packs B for each tile, and then calls the micro kernel to do the actual computation
  * */
 void nuggem(
-            int M, int N, int K,            // Matrix dimensions: C(MxN) = A(MxN) * B(MxN)
+            int M, int N, int K,            // Matrix dimensions: C(MxN) = A(MxK) * B(KxN)
             float *restrict A,              // Row-major, leading dimension K
             float *restrict B,              // Row-major, leading dimension N 
             float *restrict C,              // Row-major, leading dimension N 
@@ -33,18 +33,18 @@ void nuggem(
 
 }
 
-/* Main function to compute a 6x8 block of C ( 6 rows and 8 columns )
+/* Compute a 6x8 block of C ( 6 rows and 8 columns )
  * Using 6 rows of A (each row Kc elements long)
- * 8 columns of B ( each column Kc elements long; packed contiguously)
+ * packed_B holds the 8-wide tile k-major: NR values per depth, laid out contiguously
  * */
 void micro_kernel_6x8(
-        int Kc,                             // How many rows of B are packed ( the K dimension of this tile: 16,32,64, A multiple of 8 for AVX
+        int Kc,                             // How many depths are packed ( the K dimension of this tile )
         float *A,                           // Pointer to 6 rows of A, positioned at the right K offset
         float *packed_B,                    // The contiguous packed buffer
         float *C,                           // Pointer to 6x8 block of C to update
         int ldC,                            // Leading dimension of C for strided storing
         int ldA,
-        int Nr
+        int Nr                              // Columns per depth in packed_B ( packing stride )
         ){
     
 
@@ -67,10 +67,10 @@ void micro_kernel_6x8(
     // inner loop over K ( steps by 1 )
     for (int k = 0; k < Kc; k++){
 
-        // broadacst each A element across all 8 lanes THEN FMA into the row
+        // load the Nr packed B values for depth k ( contiguous )
         __m256 b = _mm256_loadu_ps(packed_B + k * Nr);
 
-        // load the 6 rows of A for K block
+        // broadcast each A element across all 8 lanes THEN FMA into its C row
         c0 = _mm256_fmadd_ps(_mm256_broadcast_ss(A0 + k), b, c0);
         c1 = _mm256_fmadd_ps(_mm256_broadcast_ss(A1 + k), b, c1);
         c2 = _mm256_fmadd_ps(_mm256_broadcast_ss(A2 + k), b, c2);
@@ -91,29 +91,46 @@ void micro_kernel_6x8(
 void pack_B_tile(
     float *B,                               // Original B matrix (row major)
     int ldB,                                // Leading dimension of B (usually N)
-    int row_start,                          // Starting row of the tile in B
-    int col_start,                          // Starting column of the tile in B
-    int Kc,                                 // Number of rows to pack ( K dimension )
-    int Nr,                                 // Numer of columns to pack ( C dimension )
-    float *packed                           // Packed B
+    int row_start,                          // Starting row (depth) of the tile in B
+    int col_start,                          // Starting column (N) of the tile in B
+    int Kc,                                 // Depths to pack ( K dimension )
+    int Nr,                                 // Number of columns to pack ( N dimension )
+    float *packed                           // Packed B ( k-major: Nr values per depth, contiguous )
     ){
 
-    for (int row = 0; row < Kc; row++){
+    for (int depth = 0; depth < Kc; depth++){
         for (int col = 0; col < Nr; col++) 
-            packed[row * Nr + col] = B[(row_start + row) * ldB + (col_start + col)];
+            packed[depth * Nr + col] = B[(row_start + depth) * ldB + (col_start + col)];
     }
 
 }
 
+void pack_A_tile(
+    float *A,                               // Original A matrix (row major)
+    int ldA,                                // Leading dimension of A (usually K)
+    int row_start,                          // Starting row (M) of the tile in A
+    int col_start,                          // Starting column (K / depth) of the tile in A
+    int Kc,                                 // Depths to pack ( K dimension )
+    float *packed                           // Packed A ( intended k-major: MR values per depth )
+    ){
+
+    for (int depth = 0; depth < Kc; depth++){
+        for (int m = 0; m < MR; m++) 
+            packed[depth * MR + m] = A[(row_start + m) * ldA + (col_start + depth)];
+    }
+
+}
+
+
 void micro_kernel_scalar(
         int Mr,                             // Rows of the C block ( caller's tile height )
         int Nr,                             // Columns of the C block / packed per depth
-        int Kc,                             // Number of rows to pack ( K dimension )
+        int Kc,                             // Depths to pack ( K dimension )
         int ldC,                            // Leading dimension of C
         int ldA,                            // Leading dimension of A 
         float *A,                           // Pointer to A matrix 
         float *packedB,                     // Pointer to packed B matrix 
-        float *C                            // Pointer to packed C matrix
+        float *C                            // Pointer to C block
         ){
     // init accumulators ( VLA sized by the caller's block, so no initializer -> memset )
     float c[Mr][Nr];
