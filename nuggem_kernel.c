@@ -8,10 +8,10 @@
 #define NR 8
 
 // dev test functions
-void random_fill(float *a, int n, int mrand){
-    for(int r = 0; r < n; r++)
-        for (int c = 0; c < n; c++)
-            a[r*n+c] = rand() % mrand;
+void random_fill(float *a, int x,int y, int mrand){
+    for(int r = 0; r < x; r++)
+        for (int c = 0; c < y; c++)
+            a[r*y+c] = rand() % mrand;
 }
 
 void zero_fill(float *a, int n, int r, int c){
@@ -20,16 +20,36 @@ void zero_fill(float *a, int n, int r, int c){
             a[vr*n+vc] = 0.0f;
 }
 
+void pack_B_tile(
+    float *B,                               // Original B matrix (row major)
+    int ldB,                                // Leading dimension of B (usually N)
+    int row_start,                          // Starting row (depth) of the tile in B
+    int col_start,                          // Starting column (N) of the tile in B
+    int Kc,                                 // Depths to pack ( K dimension )
+    int Nr,                                 // Number of columns to pack ( N dimension )
+    float *packed                           // Packed B ( k-major: Nr values per depth, contiguous )
+    ){
 
-/* This function loops over tiles of C, packs B for each tile, and then calls the micro kernel to do the actual computation
- * */
-void nuggem(
-            int M, int N, int K,            // Matrix dimensions: C(MxN) = A(MxK) * B(KxN)
-            float *restrict A,              // Row-major, leading dimension K
-            float *restrict B,              // Row-major, leading dimension N 
-            float *restrict C,              // Row-major, leading dimension N 
-            int ldA, int ldB, int ldC       // Leading dimensions (usually K,N,N)
-            ){ 
+    for (int depth = 0; depth < Kc; depth++){
+        for (int col = 0; col < Nr; col++) 
+            packed[depth * Nr + col] = B[(row_start + depth) * ldB + (col_start + col)];
+    }
+
+}
+
+void pack_A_tile(
+    float *A,                               // Original A matrix (row major)
+    int ldA,                                // Leading dimension of A (usually K)
+    int row_start,                          // Starting row (M) of the tile in A
+    int col_start,                          // Starting column (K / depth) of the tile in A
+    int Kc,                                 // Depths to pack ( K dimension )
+    float *packed                           // Packed A ( intended k-major: MR values per depth )
+    ){
+
+    for (int depth = 0; depth < Kc; depth++){
+        for (int m = 0; m < MR; m++) 
+            packed[depth * MR + m] = A[(row_start + m) * ldA + (col_start + depth)];
+    }
 
 }
 
@@ -88,36 +108,31 @@ void micro_kernel_6x8(
     _mm256_storeu_ps(C + 5 * ldC, _mm256_add_ps(_mm256_loadu_ps(C + 5 * ldC), c5));
 }
 
-void pack_B_tile(
-    float *B,                               // Original B matrix (row major)
-    int ldB,                                // Leading dimension of B (usually N)
-    int row_start,                          // Starting row (depth) of the tile in B
-    int col_start,                          // Starting column (N) of the tile in B
-    int Kc,                                 // Depths to pack ( K dimension )
-    int Nr,                                 // Number of columns to pack ( N dimension )
-    float *packed                           // Packed B ( k-major: Nr values per depth, contiguous )
-    ){
 
-    for (int depth = 0; depth < Kc; depth++){
-        for (int col = 0; col < Nr; col++) 
-            packed[depth * Nr + col] = B[(row_start + depth) * ldB + (col_start + col)];
+/* This function loops over tiles of C, packs B for each tile, and then calls the micro kernel to do the actual computation
+ * */
+void nuggem(
+            int M, int N, int K,            // Matrix dimensions: C(MxN) = A(MxK) * B(KxN)
+            float *restrict A,              // Row-major, leading dimension K
+            float *restrict B,              // Row-major, leading dimension N 
+            float *restrict C,              // Row-major, leading dimension N 
+            int ldA, int ldB, int ldC       // Leading dimensions (usually K,N,N)
+            ){
+    int Kc = K;
+    float *packed_B = malloc(Kc * NR * sizeof(float));
+  
+    for (int jc = 0; jc < N; jc += NR){
+        pack_B_tile(B, ldB,0,jc,Kc,NR,packed_B); 
+        for (int ic = 0; ic < M; ic += MR){
+            float *a = A + ic * ldA;
+            float *c = C + ic * ldC + jc;
+            micro_kernel_6x8(Kc, a,packed_B, c, ldC, ldA, NR);
+
+        }
+        
     }
 
-}
-
-void pack_A_tile(
-    float *A,                               // Original A matrix (row major)
-    int ldA,                                // Leading dimension of A (usually K)
-    int row_start,                          // Starting row (M) of the tile in A
-    int col_start,                          // Starting column (K / depth) of the tile in A
-    int Kc,                                 // Depths to pack ( K dimension )
-    float *packed                           // Packed A ( intended k-major: MR values per depth )
-    ){
-
-    for (int depth = 0; depth < Kc; depth++){
-        for (int m = 0; m < MR; m++) 
-            packed[depth * MR + m] = A[(row_start + m) * ldA + (col_start + depth)];
-    }
+    free(packed_B);
 
 }
 
@@ -166,56 +181,45 @@ void micro_kernel_scalar(
 
 int main(){
     srand(time(NULL));
-    int Kc = 8;
-    int ldA = Kc;                           // A panel: MR rows, each Kc long
-    int ldC = NR;                           // single-tile test: C block stored NR-wide
 
-    int dim_size = 1024;
-    float *A = malloc(dim_size * dim_size * sizeof(float));
-    float *B = malloc(dim_size * dim_size * sizeof(float));
-    float *C_scalar = calloc(dim_size * dim_size, sizeof(float));
-    float *packedB = malloc(Kc * NR * sizeof(float));
-    float *C_avx = calloc(dim_size * dim_size, sizeof(float));
+    int M = 12;
+    int N = 16;
+    int K = 10;
+    int ldA = K;
+    int ldB = N;
+    int ldC = N;
 
-    random_fill(A, dim_size, 4);
-    random_fill(B, dim_size, 4);
-
-    pack_B_tile(B, dim_size,0,0,Kc,NR,packedB); 
-
-    micro_kernel_scalar(MR,NR,Kc,ldC, ldA, A, packedB, C_scalar);
     
-    micro_kernel_6x8(Kc,A,packedB,C_avx,ldC,ldA, NR);
+    float *A    = malloc(M * K * sizeof(float));
+    float *B    = malloc(K * N * sizeof(float));
+    float *C    = calloc(M * N, sizeof(float));
+    float *C_ref = calloc(M * N, sizeof(float));
 
+    random_fill(A, M,K, 4);
+    random_fill(B, K,N, 4);
 
-    printf("RESULT C SCALAR:\n");
-    for (int r = 0; r < MR; r++){
-        for (int c = 0; c < NR; c++){
-            printf("%8.1f ", C_scalar[r*ldC+c]);
+    nuggem(M,N,K,A,B,C,ldA,ldB,ldC);
+
+    for (int i = 0; i < M; i++)
+        for (int j = 0; j < N; j++){
+            float s = 0.0f;
+            for (int k = 0; k < K; k++)
+                s += A[i*ldA + k] * B[k * ldB + j];
+            C_ref[i * ldC + j] = s;
         }
-    printf("\n");
-    }
+
+    float max_diff = 0.0f;
     
-    printf("RESULT C AVX:\n");
-    for (int r = 0; r < MR; r++){
-        for (int c = 0; c < NR; c++){
-            printf("%8.1f ", C_avx[r*ldC+c]);
-        }
-    printf("\n");
+    for (int i = 0; i < M * N; i++){
+        float d = C[i] - C_ref[i];
+        if (d < 0) d = -d;
+        if (d > max_diff) max_diff = d;
     }
-    
-    float max_diff = 0;
-    for (int i = 0; i < MR * NR; i++) {
-        float diff = C_scalar[i] - C_avx[i];
-        if (diff < 0) diff = -diff;
-        if (diff > max_diff) max_diff = diff;
-        printf("%8.1f ", diff);
-        if ((i + 1) % NR == 0) printf("\n");
-    }
-    printf("\nMax difference: %f\n", max_diff);
+    printf("M=%d N=%d K=%d   Max difference: %f\n", M, N, K, max_diff);
 
 
     
-    free(A); free(B); free(C_scalar); free(packedB); free(C_avx);
+    free(A); free(B); free(C); free(C_ref);
 
     return 0;
 }
