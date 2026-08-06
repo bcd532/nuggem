@@ -3,15 +3,24 @@
 #include <stdlib.h>
 #include <time.h>
 #include <string.h>
+#include <cblas.h>
 
 #define MR 6
 #define NR 8
+
+
 
 // dev test functions
 void random_fill(float *a, int x,int y, int mrand){
     for(int r = 0; r < x; r++)
         for (int c = 0; c < y; c++)
             a[r*y+c] = rand() % mrand;
+}
+
+double now_sec(void){
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec + ts.tv_nsec * 1e-9;
 }
 
 void zero_fill(float *a, int n, int r, int c){
@@ -126,6 +135,7 @@ void nuggem(
         for (int ic = 0; ic < M; ic += MR){
             float *a = A + ic * ldA;
             float *c = C + ic * ldC + jc;
+
             micro_kernel_6x8(Kc, a,packed_B, c, ldC, ldA, NR);
 
         }
@@ -181,10 +191,11 @@ void micro_kernel_scalar(
 
 int main(){
     srand(time(NULL));
+    openblas_set_num_threads(1);
 
-    int M = 12;
-    int N = 16;
-    int K = 10;
+    int M = 1020;
+    int N = 1024;
+    int K = 1068;
     int ldA = K;
     int ldB = N;
     int ldC = N;
@@ -194,11 +205,22 @@ int main(){
     float *B    = malloc(K * N * sizeof(float));
     float *C    = calloc(M * N, sizeof(float));
     float *C_ref = calloc(M * N, sizeof(float));
+    float *C_blas_ref = calloc(M * N, sizeof(float));
 
     random_fill(A, M,K, 4);
     random_fill(B, K,N, 4);
 
+    memset(C, 0, M*N*sizeof(float));
     nuggem(M,N,K,A,B,C,ldA,ldB,ldC);
+
+    int reps = 20;
+    double t0 = now_sec();
+    for (int r = 0; r < reps; r++){
+        memset(C,0, M*N*sizeof(float));
+        nuggem(M,N,K,A,B,C,ldA,ldB,ldC);
+        
+    }
+    double t1= now_sec();
 
     for (int i = 0; i < M; i++)
         for (int j = 0; j < N; j++){
@@ -207,6 +229,31 @@ int main(){
                 s += A[i*ldA + k] * B[k * ldB + j];
             C_ref[i * ldC + j] = s;
         }
+    
+
+    double t2= now_sec();
+    for (int r = 0; r < reps; r++){
+        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                M, N, K,
+                1.0f, A, ldA,
+                B, ldB,
+                0.0f, C, ldC);
+    }
+    double t3=now_sec();
+
+    double sec_per_call2 = (t3-t2) / reps;
+    double gflops2 = (2.0 * M * N * K) / sec_per_call2 / 1e9;
+    printf("%dx%dx%dx: %.2f ms/call, %.1f GFLOP/s\n",
+        M,N,K,sec_per_call2 * 1e3, gflops2);
+    
+
+    double sec_per_call = (t1-t0) / reps;
+    double gflops = (2.0 * M * N * K) / sec_per_call / 1e9;
+    printf("%dx%dx%dx: %.2f ms/call, %.1f GFLOP/s\n",
+        M,N,K,sec_per_call * 1e3, gflops);
+
+    volatile float sink = C[0];
+    (void)sink;
 
     float max_diff = 0.0f;
     
