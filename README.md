@@ -1,4 +1,5 @@
-# nuggem (new gemm / nugget gemm)
+# nuggem
+> (new gemm / nugget gemm)
 
 Single-precision GEMM (general matrix multiply) in C, computing C = A * B for row-major matrices.
 
