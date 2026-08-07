@@ -4,7 +4,7 @@
 #include <immintrin.h>
 
 
-void nuggem(int M, int N, int K, float *__restrict__ A, float *__restrict__ B, float *__restrict__ C, int ldA, int ldB, int ldC);
+void nuggem(int M, int N, int K, float *__restrict__ A, float *__restrict__ B, float *__restrict__ C, int ldA, int ldB, int ldC, int Kc);
 
 template<int MR, int NR>
 void micro_kernel(

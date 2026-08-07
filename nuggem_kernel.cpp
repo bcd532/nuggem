@@ -2,9 +2,10 @@
 #include <stdlib.h>
 #include <cblas.h>
 #include "nuggem_kernel.hpp"
+#include <vector>
 
-#define MR 6
-#define NR 8
+
+constexpr int MR = 6, NR = 8;
 
 
 void pack_B_tile(
@@ -43,27 +44,32 @@ void pack_A_tile(
 /* This function loops over tiles of C, packs B for each tile, and then calls the micro kernel to do the actual computation
  * */
 void nuggem(
-            int M, int N, int K,            // Matrix dimensions: C(MxN) = A(MxK) * B(KxN)
+            int M, int N, int K,                // Matrix dimensions: C(MxN) = A(MxK) * B(KxN)
             float *__restrict__ A,              // Row-major, leading dimension K
             float *__restrict__ B,              // Row-major, leading dimension N
             float *__restrict__ C,              // Row-major, leading dimension N
-            int ldA, int ldB, int ldC       // Leading dimensions (usually K,N,N)
+            int ldA, int ldB, int ldC,          // Leading dimensions (usually K,N,N)
+            int Kc                              // K cache
             ){
-    int Kc = K;
-    float *packed_B = (float*)malloc(Kc * NR * sizeof(float));
-    float *packed_A = (float*)malloc(MR * Kc * sizeof(float));
+    //int Kc = 256;
 
-    for (int jc = 0; jc < N; jc += NR){
-        pack_B_tile(B, ldB,0,jc,Kc,NR,packed_B);
+
+    std::vector<float> packed_B(Kc*NR);
+    std::vector<float> packed_A(MR * Kc);
+
+    for (int kc = 0; kc < K; kc += Kc){
+        int kb = (K - kc < Kc) ? (K - kc) : Kc;
         for (int ic = 0; ic < M; ic += MR){
-            float *c = C + ic * ldC + jc;
-            pack_A_tile(A,ldA,ic,0,Kc,packed_A);
-            micro_kernel<MR,NR>(Kc, packed_A,packed_B, c, ldC);
+            pack_A_tile(A, ldA,ic,kc,kb,packed_A.data());
+        
 
+            for (int jc = 0; jc < N; jc += NR){
+                float *c = C + ic * ldC + jc;
+                
+                pack_B_tile(B, ldB,kc,jc,kb,NR,packed_B.data());
+                micro_kernel<MR,NR>(kb, packed_A.data(),packed_B.data(), c, ldC);
+
+            }
         }
-
     }
-
-    free(packed_B); free(packed_A);
-
 }

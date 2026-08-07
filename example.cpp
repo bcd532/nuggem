@@ -52,7 +52,7 @@ int main(){
 
     // correctness of nuggem, on a clean C, BEFORE any timing clobbers it
     std::fill(C.begin(), C.end(), 0.0f);
-    nuggem(M,N,K, A.data(), B.data(), C.data(), ldA,ldB,ldC);
+    nuggem(M,N,K, A.data(), B.data(), C.data(), ldA,ldB,ldC, 32);
 
     float max_diff = 0.0f;
     for (int i = 0; i < M * N; i++){
@@ -62,12 +62,16 @@ int main(){
     }
     printf("M=%d N=%d K=%d   Max difference (nuggem vs triple-loop): %f\n", M, N, K, max_diff);
 
+    
+
+
+
     // nuggem timing 
     int reps = 20;
     double t0 = now_sec();
     for (int r = 0; r < reps; r++){
         std::fill(C.begin(), C.end(), 0.0f);
-        nuggem(M,N,K, A.data(), B.data(), C.data(), ldA,ldB,ldC);
+        nuggem(M,N,K, A.data(), B.data(), C.data(), ldA,ldB,ldC,128);
     }
     double t1= now_sec();
 
@@ -107,6 +111,8 @@ int main(){
     double gflops = (2.0 * M * N * K) / sec_per_call / 1e9;
     out << "NUGGEM," << M << "," << N << "," << K << "," << gflops << "," << (long)now <<"\n";
     
+    
+
     std::cout << "Results sent to 'bench.csv'";
     return 0;
 }
