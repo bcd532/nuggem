@@ -1,5 +1,7 @@
 # local makes
 nuggem
+bench.csv
+example
 
 #clanger
 .clangd
