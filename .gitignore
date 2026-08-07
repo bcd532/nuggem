@@ -2,6 +2,8 @@
 nuggem
 bench.csv
 example
+ktest
+*.o
 
 #clanger
 .clangd
