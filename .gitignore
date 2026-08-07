@@ -1,4 +1,5 @@
 # local makes
+build/
 nuggem
 bench.csv
 example
@@ -6,4 +7,8 @@ ktest
 *.o
 
 #clanger
-.clangd
+compile_commands.json
+.cache/
+
+# local files
+localdata/

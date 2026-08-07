@@ -1,10 +1,24 @@
-#ifndef NUGGEM_KERNEL_HPP
-#define NUGGEM_KERNEL_HPP
+#ifndef NUGGEM_HPP
+#define NUGGEM_HPP
 
 #include <immintrin.h>
 
 
-void nuggem(int M, int N, int K, float *__restrict__ A, float *__restrict__ B, float *__restrict__ C, int ldA, int ldB, int ldC, int Kc);
+namespace nuggem{
+
+// C = A * B, single precision, row-major.
+//   A is M×K, B is K×N, C is M×N.
+//   ldA,ldB,ldC = elements per row in storage (ldA>=K, ldB>=N, ldC>=N).
+// Overwrite semantics: C is fully written (implementation zeroes it first).
+// Current CPU backend constraints: M % 6 == 0, N % 8 == 0 (no edge handling yet).
+    void ng_sgemm_cpu(int M, int N, int K,
+        const float *__restrict__ A,
+        const float *__restrict__ B,
+        float *__restrict__ C,
+        int ldA, int ldB, int ldC);
+
+
+namespace detail{
 
 template<int MR, int NR>
 void micro_kernel(
@@ -25,6 +39,12 @@ void micro_kernel(
 
     for (int i = 0; i < MR; i++)
         _mm256_storeu_ps(C + i*ldC, _mm256_add_ps(_mm256_loadu_ps(C + i*ldC), acc[i]));
+
+
+}
+
+}
+
 }
 
 #endif

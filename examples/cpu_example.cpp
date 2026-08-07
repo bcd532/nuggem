@@ -2,9 +2,12 @@
 #include <cblas.h>
 #include <vector>
 #include <fstream>
-#include "nuggem_kernel.hpp"
+#include "nuggem.hpp"
 #include <stdlib.h>
 #include <iostream>
+#include <cstdio>
+#include <string>
+#include <algorithm>
 
 
 // dev test functions
@@ -27,9 +30,9 @@ int main(){
     openblas_set_num_threads(1);
 
     int M = 1020;
-
     int N = 1024;
     int K = 1068;
+    int epochmx = 1;
     int ldA = K;
     int ldB = N;
     int ldC = N;
@@ -52,7 +55,7 @@ int main(){
 
     // correctness of nuggem, on a clean C, BEFORE any timing clobbers it
     std::fill(C.begin(), C.end(), 0.0f);
-    nuggem(M,N,K, A.data(), B.data(), C.data(), ldA,ldB,ldC, 32);
+    nuggem::ng_sgemm_cpu(M,N,K, A.data(), B.data(), C.data(), ldA,ldB,ldC);
 
     float max_diff = 0.0f;
     for (int i = 0; i < M * N; i++){
@@ -64,14 +67,14 @@ int main(){
 
     
 
-
+    for (int epoch = 0; epoch < epochmx; epoch++){
 
     // nuggem timing 
     int reps = 20;
     double t0 = now_sec();
     for (int r = 0; r < reps; r++){
         std::fill(C.begin(), C.end(), 0.0f);
-        nuggem(M,N,K, A.data(), B.data(), C.data(), ldA,ldB,ldC,128);
+        nuggem::ng_sgemm_cpu(M,N,K, A.data(), B.data(), C.data(), ldA,ldB,ldC);
     }
     double t1= now_sec();
 
@@ -103,15 +106,16 @@ int main(){
 
     std::ofstream out("bench.csv", std::ios::app); 
     if (need_header){
-        out << "impl,M,N,K,gflops,timestamps\n";
+        out << "impl,M,N,K,gflops,timestamp\n";
     }
-    out << "CBLAS," << M << "," << N << "," << K << "," << gflops2 << "," << (long)now << "\n";   
+    
+    out << ((epochmx > 1) ? ("CBLAS," + std::to_string(M) + "," + std::to_string(N) + "," + std::to_string(K) + "," + std::to_string(gflops2) + "," + std::to_string((long)now) + "\n") : "\n");
     
     double sec_per_call = (t1-t0) / reps;
     double gflops = (2.0 * M * N * K) / sec_per_call / 1e9;
     out << "NUGGEM," << M << "," << N << "," << K << "," << gflops << "," << (long)now <<"\n";
     
-    
+    }
 
     std::cout << "Results sent to 'bench.csv'";
     return 0;
